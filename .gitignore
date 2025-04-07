@@ -8,3 +8,4 @@ wandb/
 eval_data
 runs
 **/data/
+tokenized_datum_*

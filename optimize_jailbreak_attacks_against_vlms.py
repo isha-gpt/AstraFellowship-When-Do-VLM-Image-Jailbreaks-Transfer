@@ -7,6 +7,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = n_threads_str
 os.environ["MKL_NUM_THREADS"] = n_threads_str
 os.environ["VECLIB_MAXIMUM_THREADS"] = n_threads_str
 os.environ["NUMEXPR_NUM_THREADS"] = n_threads_str
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 # The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...
 # To disable this warning, you can either:
@@ -109,6 +110,8 @@ def optimize_vlm_adversarial_examples():
         devices = None
         callbacks.extend([])
         print("No GPU available.")
+        
+    print(f"Using device: {torch.cuda.current_device()}, {torch.cuda.get_device_name(torch.cuda.current_device())}")
 
     # https://lightning.ai/docs/pytorch/stable/common/trainer.html
     trainer = lightning.pytorch.Trainer(

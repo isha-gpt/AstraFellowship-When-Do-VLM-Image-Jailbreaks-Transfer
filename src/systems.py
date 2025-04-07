@@ -170,28 +170,28 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
 
         return losses_per_model["avg"]
 
-    def optimizer_step(self, *args, **kwargs):
-        if (
-            self.optimizer_step_counter
-            % self.wandb_config["lightning_kwargs"]["log_image_every_n_steps"]
-        ) == 0:
-            wandb.log(
-                {
-                    f"jailbreak_image_step={self.optimizer_step_counter}": wandb.Image(
-                        # https://docs.wandb.ai/ref/python/data-types/image
-                        # 0 removes the size-1 batch dimension.
-                        # The transformation doesn't accept bfloat16.
-                        data_or_path=self.convert_tensor_to_pil_image(
-                            self.tensor_image[0].detach().to(torch.float32)
-                        ),
-                        # caption="Adversarial Image",
-                    ),
-                },
-            )
-        super().optimizer_step(*args, **kwargs)
-        self.optimizer_step_counter += 1
-        with torch.no_grad():
-            self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
+    # def optimizer_step(self, *args, **kwargs):
+    #     if (
+    #         self.optimizer_step_counter
+    #         % self.wandb_config["lightning_kwargs"]["log_image_every_n_steps"]
+    #     ) == 0:
+    #         wandb.log(
+    #             {
+    #                 f"jailbreak_image_step={self.optimizer_step_counter}": wandb.Image(
+    #                     # https://docs.wandb.ai/ref/python/data-types/image
+    #                     # 0 removes the size-1 batch dimension.
+    #                     # The transformation doesn't accept bfloat16.
+    #                     data_or_path=self.convert_tensor_to_pil_image(
+    #                         self.tensor_image[0].detach().to(torch.float32)
+    #                     ),
+    #                     # caption="Adversarial Image",
+    #                 ),
+    #             },
+    #         )
+    #     super().optimizer_step(*args, **kwargs)
+    #     self.optimizer_step_counter += 1
+    #     with torch.no_grad():
+    #         self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
 
 
 class VLMEnsembleEvaluatingSystem(lightning.LightningModule):
