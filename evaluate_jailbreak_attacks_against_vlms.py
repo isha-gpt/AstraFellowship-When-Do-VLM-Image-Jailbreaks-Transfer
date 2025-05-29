@@ -55,7 +55,7 @@ def evaluate_vlm_adversarial_examples():
     print("W&B Config:")
     pp.pprint(wandb_config)
     print("CUDA VISIBLE DEVICES: ", os.environ["CUDA_VISIBLE_DEVICES"])
-    assert torch.cuda.device_count() == 1
+    #assert torch.cuda.device_count() == 1
 
     # Convert these strings to sets of strings.
     # This needs to be done after writing JSON to disk because sets are not JSON serializable.
@@ -102,9 +102,9 @@ def evaluate_vlm_adversarial_examples():
     runs_jailbreak_dict_list = src.utils.load_jailbreak_dicts_list(
         wandb_attack_run_id=wandb_config["wandb_attack_run_id"],
         wandb_sweep_id=None,
-        # refresh=True,
-        refresh=False,
+        refresh=True,
     )
+    print(f"runs_jailbreak_dict_list: {runs_jailbreak_dict_list}")
     wandb.config.update(
         {
             "models_to_attack": runs_jailbreak_dict_list[0]["models_to_attack"],
@@ -184,7 +184,7 @@ def evaluate_vlm_adversarial_examples():
         )
 
         # Only generate every 1000 optimizer steps.
-        if (run_jailbreak_dict["optimizer_step_counter"] % 1000) != 0:
+        if (run_jailbreak_dict["optimizer_step_counter"] % 10) != 0:
             continue
 
         generations_prompts_targets_evals_dict = {

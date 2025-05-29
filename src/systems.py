@@ -36,11 +36,47 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             image_kwargs=wandb_config["image_kwargs"],
             seed=wandb_config["seed"],
         )
-        # print(f"tensor_image.shape: {tensor_image.shape}")
-        # print(f"tensor_image: {tensor_image}")
+        
+        # Store the original image for masked pixels
+        self.original_image = tensor_image.clone()
+        
+        # Create mask for random patch
+        patch_size = wandb_config["image_kwargs"]["patch_size"]
+        image_size = wandb_config["image_kwargs"]["image_size"]
+        
+        # Initialize mask as all True (all pixels masked)
+        mask = torch.ones_like(tensor_image, dtype=torch.bool)
+        
+        if patch_size < image_size:
+            # Calculate random starting position for the patch
+            max_start = image_size - patch_size
+            start_h = torch.randint(0, max_start + 1, (1,)).item()
+            start_w = torch.randint(0, max_start + 1, (1,)).item()
+            
+            # Set the patch region to False (unmasked)
+            mask[..., start_h:start_h + patch_size, start_w:start_w + patch_size] = False
+            
+            print(f"\nPatch masking statistics:")
+            print(f"- Image size: {image_size}x{image_size}")
+            print(f"- Patch size: {patch_size}x{patch_size}")
+            print(f"- Patch position: ({start_h}, {start_w})")
+            print(f"- Total pixels: {mask.numel()}")
+            print(f"- Masked (unchangeable) pixels: {mask.sum().item()}")
+            print(f"- Unmasked (changeable) pixels: {(mask.numel() - mask.sum().item()) // 3}")
+            print(f"- Percentage masked: {100 * (mask.sum().item() // 3) / (mask.numel() // 3):.1f}%")
+        
+        self.mask = mask
         self.tensor_image = torch.nn.Parameter(tensor_image, requires_grad=True)
         self.convert_tensor_to_pil_image = torchvision.transforms.ToPILImage()
         self.optimizer_step_counter = 0
+
+    def to(self, *args, **kwargs):
+        # Call parent's to() method
+        super().to(*args, **kwargs)
+        # Move mask to the same device as tensor_image
+        self.mask = self.mask.to(self.tensor_image.device)
+        self.original_image = self.original_image.to(self.tensor_image.device)
+        return self
 
     def configure_optimizers(self) -> Dict:
         # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
@@ -170,28 +206,54 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
 
         return losses_per_model["avg"]
 
-    # def optimizer_step(self, *args, **kwargs):
-    #     if (
-    #         self.optimizer_step_counter
-    #         % self.wandb_config["lightning_kwargs"]["log_image_every_n_steps"]
-    #     ) == 0:
-    #         wandb.log(
-    #             {
-    #                 f"jailbreak_image_step={self.optimizer_step_counter}": wandb.Image(
-    #                     # https://docs.wandb.ai/ref/python/data-types/image
-    #                     # 0 removes the size-1 batch dimension.
-    #                     # The transformation doesn't accept bfloat16.
-    #                     data_or_path=self.convert_tensor_to_pil_image(
-    #                         self.tensor_image[0].detach().to(torch.float32)
-    #                     ),
-    #                     # caption="Adversarial Image",
-    #                 ),
-    #             },
-    #         )
-    #     super().optimizer_step(*args, **kwargs)
-    #     self.optimizer_step_counter += 1
-    #     with torch.no_grad():
-    #         self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
+    def optimizer_step(self, *args, **kwargs):
+        # Store pre-optimization state for logging
+        pre_opt_image = self.tensor_image.clone().detach()
+        
+        # Perform optimization step
+        super().optimizer_step(*args, **kwargs)
+        self.optimizer_step_counter += 1
+        
+        with torch.no_grad():
+            # First clamp all values
+            self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
+            
+            # Calculate changes before applying mask
+            pixel_changes = (self.tensor_image.data - pre_opt_image).abs()
+            max_change_masked = pixel_changes[self.mask].max().item()
+            max_change_unmasked = pixel_changes[~self.mask].max().item()
+            avg_change_masked = pixel_changes[self.mask].mean().item()
+            avg_change_unmasked = pixel_changes[~self.mask].mean().item()
+            
+            # Then restore original pixels where mask is True
+            self.tensor_image.data[self.mask] = self.original_image[self.mask]
+            
+            # Log statistics every N steps
+            if self.optimizer_step_counter % self.wandb_config["lightning_kwargs"]["log_image_every_n_steps"] == 0:
+                print(f"\nStep {self.optimizer_step_counter} pixel change statistics:")
+                print(f"- Max change in masked pixels (before restore): {max_change_masked:.6f}")
+                print(f"- Max change in unmasked pixels: {max_change_unmasked:.6f}")
+                print(f"- Avg change in masked pixels (before restore): {avg_change_masked:.6f}")
+                print(f"- Avg change in unmasked pixels: {avg_change_unmasked:.6f}")
+                
+                # Also log to wandb
+                wandb.log({
+                    f"jailbreak_image_step={self.optimizer_step_counter}": wandb.Image(
+                        data_or_path=self.convert_tensor_to_pil_image(
+                            self.tensor_image[0].detach().to(torch.float32)
+                        ),
+                    ),
+                    "pixel_changes/max_change_masked": max_change_masked,
+                    "pixel_changes/max_change_unmasked": max_change_unmasked,
+                    "pixel_changes/avg_change_masked": avg_change_masked,
+                    "pixel_changes/avg_change_unmasked": avg_change_unmasked,
+                    "optimizer_step": self.optimizer_step_counter,
+                })
+                
+                # Verify mask is still properly applied
+                diff_from_original = (self.tensor_image.data - self.original_image).abs().max().item()
+                if diff_from_original > 1e-6:
+                    print(f"Warning: Maximum difference from original in masked pixels: {diff_from_original:.6f}")
 
 
 class VLMEnsembleEvaluatingSystem(lightning.LightningModule):

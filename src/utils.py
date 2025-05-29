@@ -13,6 +13,8 @@ import torch.utils.data
 import torchvision.transforms.v2
 from typing import Any, Dict, List, Tuple
 import wandb
+import time
+from requests.exceptions import ReadTimeout
 
 from src.data import VLMEnsembleTextDataset, VLMEnsembleTextDataModule
 from src.models.ensemble import VLMEnsemble
@@ -106,8 +108,20 @@ def load_jailbreak_dicts_list(
 
         api = wandb.Api()
         if wandb_sweep_id is None and wandb_attack_run_id is not None:
-            run = api.run(f"universal-vlm-jailbreak/{wandb_attack_run_id}")
-            runs = [run]
+            print(f"Looking for run ID: {wandb_attack_run_id}")
+            try:
+                run = api.run(f"universal-vlm-jailbreak/{wandb_attack_run_id}")
+                print(f"Found run: {run.id}")
+                print(f"Run name: {run.name}")
+                print(f"Run state: {run.state}")
+                runs = [run]
+            except Exception as e:
+                print(f"Error finding run: {e}")
+                # List all runs in the project to help debug
+                print("\nListing all runs in universal-vlm-jailbreak project:")
+                for r in api.runs("universal-vlm-jailbreak"):
+                    print(f"Run ID: {r.id}, Name: {r.name}, State: {r.state}")
+                raise
         elif wandb_sweep_id is not None and wandb_attack_run_id is None:
             sweep = api.sweep(f"universal-vlm-jailbreak/{wandb_attack_run_id}")
             runs = list(sweep.runs)
@@ -169,12 +183,9 @@ def load_jailbreak_dicts_list(
 
 
 def retrieve_wandb_username() -> str:
-    # system_username = getpass.getuser()
-    # if system_username == "rschaef":
-    #     wandb_username = "rylan"
-    # else:
-    #     raise ValueError(f"Unknown W&B username: {system_username}")
     import wandb
+    import time
+    from requests.exceptions import ReadTimeout
 
     api = wandb.Api(timeout=30)
     wandb_username = api.viewer.username
