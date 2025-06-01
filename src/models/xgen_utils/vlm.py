@@ -590,7 +590,8 @@ class VLM(nn.Module):
 
     def forward(
         self,
-        vision_x: Optional[torch.Tensor],
+        vision_x: Optional[torch.Tensor] = None,
+        vision_tokens: Optional[torch.Tensor] = None,
         lang_x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
@@ -609,6 +610,8 @@ class VLM(nn.Module):
                 only F = 1 is supported (single-frame videos)
                 if T_img > the number of media tokens in the corresponding input_ids (lang_x),
                 only the first number of media tokens in lang_x are used
+            vision_tokens: Pre-computed vision tokens from vision encoder and projector
+                shape (B, T_img, n, d) where n is number of tokens per image and d is embedding dimension
             lang_x: Language input ids, with media tokens denoting where
                 visual media should be inserted.
                 shape (B, T_txt)
@@ -627,13 +630,15 @@ class VLM(nn.Module):
         assert not (past_vision_tokens is None) ^ (
             past_media_locations is None
         ), "past_vision_tokens and past_media_locations must both be None or both be not None"
+        
+        # Ensure we have either vision_x or vision_tokens
+        assert (vision_x is not None) != (vision_tokens is not None), "Must provide either vision_x or vision_tokens, but not both"
 
-        # convert pixels to vision tokens
+        # convert pixels to vision tokens if needed
         if vision_x is not None:
             vision_features = self._encode_vision_x(vision_x=vision_x)
             vision_tokens = self.vision_tokenizer(vision_features)
-        else:
-            vision_tokens = None
+        # If vision_tokens is provided, use it directly
 
         # fuse the vision and language tokens
         new_inputs = self._prepare_inputs_for_forward(

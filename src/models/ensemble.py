@@ -155,101 +155,42 @@ class VLMEnsemble(lightning.LightningModule):
 
     def compute_loss(
         self,
-        image: torch.Tensor,
         text_data_by_model: Dict[str, Dict[str, torch.Tensor]],
+        image: Optional[torch.Tensor] = None,
+        image_embeddings: Optional[Dict[str, torch.Tensor]] = None,
         non_blocking: bool = False,
     ) -> Dict[str, torch.Tensor]:
         # Always calculate loss per model and use for updating the adversarial example.
         losses_per_model: Dict[str, torch.Tensor] = {}
+        
+        # Ensure we have either image or image_embeddings
+        assert (image is not None) != (image_embeddings is not None), "Must provide either image or image_embeddings, but not both"
+        
+        # Create handles for async computation
         handles = {}
+        
+        for model_name, model_wrapper in self.vlms_dict.items():
+            # Get the text data for this model
+            model_text_data = text_data_by_model[model_name]
+            
+            # Compute loss based on whether we have image or embeddings
+            if image is not None:
+                # Original behavior - pass image directly
+                loss = model_wrapper.compute_loss(
+                    image=image,
+                    text_data=model_text_data,
+                )
+            else:
+                # New behavior - use pre-computed embeddings
+                loss = model_wrapper.compute_loss(
+                    image_embeddings=image_embeddings[model_name],
+                    text_data=model_text_data,
+                )
+            
+            # Store handle for async computation
+            handles[model_name] = torch.jit.fork(loss)
 
-        # TODO: How to check whether or not this is blocking?
-        # Ran experiments to confirm.
-        for model_idx, (model_name, model_wrapper) in enumerate(self.vlms_dict.items()):
-            model_wrapper_device = model_wrapper.device
-
-            # # Implementation #0.
-            # # Compute the loss for each model
-            # loss = model_wrapper.compute_loss(
-            #     image=image.to(model_wrapper_device, non_blocking=non_blocking),
-            #     input_ids=text_data_by_model[model_name]["input_ids"].to(
-            #         model_wrapper_device,
-            #     ),
-            #     attention_mask=text_data_by_model[model_name]["attention_mask"].to(
-            #         model_wrapper_device,
-            #     ),
-            #     labels=text_data_by_model[model_name]["labels"].to(
-            #         model_wrapper_device,
-            #     ),
-            # )
-            # losses_per_model[model_name] = loss.to(
-            #     self.device,
-            # )
-
-            # Implementation #1.
-            # Compute the loss for each model
-            # loss = model_wrapper.compute_loss(
-            #     image=image.to(model_wrapper_device, non_blocking=non_blocking),
-            #     input_ids=text_data_by_model[model_name]["input_ids"].to(
-            #         model_wrapper_device,
-            #         non_blocking=non_blocking,
-            #     ),
-            #     attention_mask=text_data_by_model[model_name]["attention_mask"].to(
-            #         model_wrapper_device,
-            #         non_blocking=non_blocking,
-            #     ),
-            #     labels=text_data_by_model[model_name]["labels"].to(
-            #         model_wrapper_device,
-            #         non_blocking=non_blocking,
-            #     ),
-            # )
-            # losses_per_model[model_name] = loss.to(
-            #     self.device, non_blocking=non_blocking
-            # )
-
-            # Implementation #2.
-            # image = image.to(model_wrapper_device, non_blocking=non_blocking)
-            # input_ids = text_data_by_model[model_name]["input_ids"].to(
-            #     model_wrapper_device,
-            #     non_blocking=non_blocking,
-            # )
-            # attention_mask = text_data_by_model[model_name]["attention_mask"].to(
-            #     model_wrapper_device,
-            #     non_blocking=non_blocking,
-            # )
-            # labels = text_data_by_model[model_name]["labels"].to(
-            #     model_wrapper_device,
-            #     non_blocking=non_blocking,
-            # )
-
-            # # Fork the computation, i.e., schedule it to run in parallel
-            # handles[model_name] = torch.jit.fork(
-            #     model_wrapper.compute_loss,
-            #     image=image,
-            #     input_ids=input_ids,
-            #     attention_mask=attention_mask,
-            #     labels=labels,
-            # )
-
-            # Implementation #3.
-            handles[model_name] = torch.jit.fork(
-                model_wrapper.compute_loss,
-                image=image.to(model_wrapper_device, non_blocking=non_blocking),
-                input_ids=text_data_by_model[model_name]["input_ids"].to(
-                    model_wrapper_device,
-                    non_blocking=non_blocking,
-                ),
-                attention_mask=text_data_by_model[model_name]["attention_mask"].to(
-                    model_wrapper_device,
-                    non_blocking=non_blocking,
-                ),
-                labels=text_data_by_model[model_name]["labels"].to(
-                    model_wrapper_device,
-                    non_blocking=non_blocking,
-                ),
-            )
-
-        # # Collect results from all models
+        # Collect results from all models
         for model_name, handle in handles.items():
             loss = torch.jit.wait(handle)
             losses_per_model[model_name] = loss.to(self.device, non_blocking=True)
@@ -377,9 +318,9 @@ class VLMEnsemble(lightning.LightningModule):
 
     def to(
         self,
+        non_blocking: bool = False,
         device: torch.device = None,
         dtype: torch.dtype = None,
-        non_blocking: bool = False,
     ):
         kwargs = {}
         if device is not None:

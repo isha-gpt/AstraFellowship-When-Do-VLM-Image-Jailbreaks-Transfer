@@ -69,6 +69,10 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
         self.tensor_image = torch.nn.Parameter(tensor_image, requires_grad=True)
         self.convert_tensor_to_pil_image = torchvision.transforms.ToPILImage()
         self.optimizer_step_counter = 0
+        
+        # Store image embeddings for language-only optimization
+        self.image_embeddings = None
+        self.optimize_language_only = wandb_config.get("optimize_language_only", False)
 
     def to(self, *args, **kwargs):
         # Call parent's to() method
@@ -174,10 +178,38 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
         self, batch: Dict[str, Dict[str, torch.Tensor]], batch_idx: int
     ) -> torch.Tensor:
         # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#training_step
-        losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
-            image=self.tensor_image,
-            text_data_by_model=batch,
-        )
+        
+        if self.optimize_language_only:
+            # If we're optimizing language-only and don't have embeddings yet, compute them
+            if self.image_embeddings is None:
+                with torch.no_grad():
+                    # Get image embeddings from each model in the ensemble
+                    self.image_embeddings = {}
+                    for model_name, model_wrapper in self.vlm_ensemble.vlms_dict.items():
+                        # Pass image through vision encoder and projector
+                        vision_features = model_wrapper.vlm._encode_vision_x(vision_x=self.tensor_image)
+                        vision_tokens = model_wrapper.vlm.vision_tokenizer(vision_features)
+                        self.image_embeddings[model_name] = vision_tokens
+                        
+                        # Log the embeddings to wandb
+                        wandb.log({
+                            f"image_embeddings_model={model_name}_step={self.optimizer_step_counter}": wandb.Histogram(
+                                vision_tokens.detach().cpu().numpy().flatten()
+                            )
+                        })
+            
+            # Use stored embeddings for loss computation
+            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
+                image_embeddings=self.image_embeddings,
+                text_data_by_model=batch,
+            )
+        else:
+            # Original behavior - optimize through entire model
+            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
+                image=self.tensor_image,
+                text_data_by_model=batch,
+            )
+            
         for loss_str, loss_val in losses_per_model.items():
             self.log(
                 f"loss/{loss_str}",
@@ -194,15 +226,6 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             on_epoch=False,
             sync_dist=True,
         )
-
-        # if batch_idx == 0:
-        #     print(torch.cuda.memory_summary())
-        # for obj in gc.get_objects():
-        #     try:
-        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-        #             print(type(obj), obj.size())
-        #     except:
-        #         pass
 
         return losses_per_model["avg"]
 
@@ -249,6 +272,20 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
                     "pixel_changes/avg_change_unmasked": avg_change_unmasked,
                     "optimizer_step": self.optimizer_step_counter,
                 })
+                
+                # If optimizing language-only, update and log embeddings
+                if self.optimize_language_only:
+                    for model_name, model_wrapper in self.vlm_ensemble.vlms_dict.items():
+                        with torch.no_grad():
+                            vision_features = model_wrapper.vlm._encode_vision_x(vision_x=self.tensor_image)
+                            vision_tokens = model_wrapper.vlm.vision_tokenizer(vision_features)
+                            self.image_embeddings[model_name] = vision_tokens
+                            
+                            wandb.log({
+                                f"image_embeddings_model={model_name}_step={self.optimizer_step_counter}": wandb.Histogram(
+                                    vision_tokens.detach().cpu().numpy().flatten()
+                                )
+                            })
                 
                 # Verify mask is still properly applied
                 diff_from_original = (self.tensor_image.data - self.original_image).abs().max().item()

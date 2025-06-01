@@ -1,7 +1,7 @@
 import abc
 import lightning
 import torch.nn
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 class VisionLanguageModel(abc.ABC, lightning.LightningModule):
@@ -11,11 +11,10 @@ class VisionLanguageModel(abc.ABC, lightning.LightningModule):
     @abc.abstractmethod
     def compute_loss(
         self,
-        image: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: torch.Tensor,
-    ):
+        text_data: Dict[str, torch.Tensor],
+        image: Optional[torch.Tensor] = None,
+        image_embeddings: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         pass
 
     @abc.abstractmethod
