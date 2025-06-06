@@ -171,9 +171,15 @@ def optimize_vlm_adversarial_examples():
     )
 
     # Convert to float32 for generation.
-    vlm_ensemble_system.tensor_image = vlm_ensemble_system.tensor_image.to(
-        torch.float32
-    )
+    if wandb_config["opt_type"] == "full_vlm":
+        vlm_ensemble_system.tensor_image = vlm_ensemble_system.tensor_image.to(
+            torch.float32
+        )
+    else:
+        # Create float32 copy for generation
+        projected_patch_for_gen = vlm_ensemble_system.projected_patch_embeddings.detach().to(torch.float32)
+
+
     # Load prompts for generation spot-checking.
     for split in ["train", "eval"]:
         prompts_and_targets_dict = src.data.load_prompts_and_targets(
@@ -198,9 +204,14 @@ def optimize_vlm_adversarial_examples():
                 )
             ):
                 start_time = time.time()
-                model_generations = vlm_ensemble_system.vlm_ensemble.vlms_dict[
-                    model_name_str
-                ].generate(image=vlm_ensemble_system.tensor_image, prompts=[prompt])
+                if wandb_config["opt_type"] == "full_vlm":
+                    model_generations = vlm_ensemble_system.vlm_ensemble.vlms_dict[
+                        model_name_str
+                    ].generate(prompts=[prompt], image=vlm_ensemble_system.tensor_image)
+                elif wandb_config["opt_type"] == "lm_only":
+                    model_generations = vlm_ensemble_system.vlm_ensemble.vlms_dict[
+                        model_name_str
+                    ].generate(prompts=[prompt], latent_image=projected_patch_for_gen)
                 model_generations_dict["generations"].extend(model_generations)
                 model_generations_dict["prompts"].extend([prompt])
                 model_generations_dict["targets"].extend([target])

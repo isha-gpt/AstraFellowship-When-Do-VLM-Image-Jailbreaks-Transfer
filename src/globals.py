@@ -118,7 +118,7 @@ default_attack_config = {
         # "limit_train_batches": 1.0,
         "limit_train_batches": 0.05,  # Fast debugging.
         "log_loss_every_n_steps": 1,
-        "log_image_every_n_steps": 1000,
+        "log_image_every_n_steps": 5,
         "precision": "bf16-mixed",
         # "precision": "bf16-true",
     },
@@ -133,22 +133,22 @@ default_attack_config = {
     # "models_to_attack": "{'xgen-mm-phi3-mini-instruct-r-v1'}",
     # "models_to_attack": "{'prism-reproduction-llava-v15+13b'}",
     # "models_to_attack": "{'prism-dinosiglip+7b'}",
-    "models_to_attack": "{'prism-clip+7b'}",
+    #"models_to_attack": "{'prism-clip+7b'}",
     # "models_to_attack": "{'prism-phi-instruct-3+4b+clip'}",
     # "models_to_attack": "{'prism-reproduction-llava-v15+7b', 'prism-clip+7b'}",
     # "models_to_attack": "{'prism-reproduction-llava-v15+7b', 'prism-reproduction-llava-v15+13b'}",
     # "models_to_attack": "{'prism-clip+7b', 'prism-siglip+7b'}",
-    # "models_to_attack": "{'prism-gemma-instruct+2b+dinosiglip'}",
+    "models_to_attack": "{'prism-gemma-instruct+2b+clip'}",
     # "models_to_attack": "{'prism-llama3-instruct+8b+dinosiglip'}",
     # "models_to_attack": "{'prism-gemma-instruct+2b+siglip', 'prism-llama3-instruct+8b+dinosiglip'}",
     # "models_to_attack": "{'prism-dinosiglip+7b'}",
     # "models_to_attack": "{'llava-v1p5-vicuna7b', 'llava-v1p6-mistral7b'}",
     "model_generation_kwargs": {},
-    "n_grad_steps": 29,
+    "n_grad_steps": 6,
     "n_generations": 2,
     "optimization": {
         "eps": 1e-4,
-        "learning_rate": 0.001,
+        "learning_rate": 0.1,
         "momentum": 0.0,
         # "momentum": 0.9,
         # "optimizer": "adam",
@@ -156,6 +156,7 @@ default_attack_config = {
         "weight_decay": 0.00001,
     },
     "seed": 0,
+    "opt_type": "lm_only",
 }
 
 
