@@ -133,19 +133,26 @@ class PrismaticVisionLanguageModel(VisionLanguageModel, lightning.LightningModul
     def compute_loss(
         self,
         image: torch.Tensor,
+        latent_image: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        images = image.repeat(len(input_ids), 1, 1, 1)
-        transformed_images: Union[
-            torch.Tensor, Dict[str, torch.Tensor]
-        ] = self.images_transform_fn(images)
+        
+        transformed_images = None
+        if image is not None:
+            images = image.repeat(len(input_ids), 1, 1, 1)
+            transformed_images: Union[
+                torch.Tensor, Dict[str, torch.Tensor]
+            ] = self.images_transform_fn(images)
+        
+
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
             pixel_values=transformed_images,
+            latent_image=latent_image,
         )
         return outputs.loss
 
@@ -212,12 +219,20 @@ class PrismaticVisionLanguageModel(VisionLanguageModel, lightning.LightningModul
         return results
 
     @torch.inference_mode()
-    def generate(self, image: torch.Tensor, prompts: List[str]) -> List[str]:
+    def generate(self, prompts: List[str], image: Optional[torch.Tensor] = None, latent_image: Optional[torch.Tensor] = None) -> List[str]:
         # We should only have a single image.
-        assert image.shape[0] == 1
-        pil_image = torchvision.transforms.functional.to_pil_image(
-            image[0].to(torch.float32)
-        )
+        assert image is not None or latent_image is not None
+
+        pil_image = None
+        if image is not None:
+            assert image.shape[0] == 1
+            pil_image = torchvision.transforms.functional.to_pil_image(
+                image[0].to(torch.float32)
+            )
+        else:
+            latent_image = latent_image.to(self.model.device)
+
+
         model_generations = []
         # Currently, Prismatic only supports one prompt at a time.
         # See https://github.com/TRI-ML/prismatic-vlms/blob/main/prismatic/models/vlms/prismatic.py#L535
@@ -230,6 +245,7 @@ class PrismaticVisionLanguageModel(VisionLanguageModel, lightning.LightningModul
             generated_text = self.model.generate(
                 prompt_text=prompt_text,
                 image=pil_image,  # This needs to be the PIL image.
+                latent_image=latent_image,
                 do_sample=True if self.generation_kwargs["temperature"] > 0 else False,
                 **self.generation_kwargs,
             )

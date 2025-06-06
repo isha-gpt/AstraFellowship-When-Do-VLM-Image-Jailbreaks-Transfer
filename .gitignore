@@ -9,3 +9,4 @@ eval_data
 runs
 **/data/
 tokenized_datum_*
+prompts_and_targets/advbench/tokenized

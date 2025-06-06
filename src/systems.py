@@ -4,7 +4,7 @@ import lightning
 import torch
 import torch.optim
 import torchvision.transforms
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import wandb
 
 from src.models.ensemble import VLMEnsemble
@@ -36,38 +36,36 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             image_kwargs=wandb_config["image_kwargs"],
             seed=wandb_config["seed"],
         )
-        
-        # Store the original image for masked pixels
-        self.original_image = tensor_image.clone()
-        
-        # Create mask for random patch
-        patch_size = wandb_config["image_kwargs"]["patch_size"]
-        image_size = wandb_config["image_kwargs"]["image_size"]
-        
-        # Initialize mask as all True (all pixels masked)
-        mask = torch.ones_like(tensor_image, dtype=torch.bool)
-        
-        if patch_size < image_size:
-            # Calculate random starting position for the patch
-            max_start = image_size - patch_size
-            start_h = torch.randint(0, max_start + 1, (1,)).item()
-            start_w = torch.randint(0, max_start + 1, (1,)).item()
-            
-            # Set the patch region to False (unmasked)
-            mask[..., start_h:start_h + patch_size, start_w:start_w + patch_size] = False
-            
-            print(f"\nPatch masking statistics:")
-            print(f"- Image size: {image_size}x{image_size}")
-            print(f"- Patch size: {patch_size}x{patch_size}")
-            print(f"- Patch position: ({start_h}, {start_w})")
-            print(f"- Total pixels: {mask.numel()}")
-            print(f"- Masked (unchangeable) pixels: {mask.sum().item()}")
-            print(f"- Unmasked (changeable) pixels: {(mask.numel() - mask.sum().item()) // 3}")
-            print(f"- Percentage masked: {100 * (mask.sum().item() // 3) / (mask.numel() // 3):.1f}%")
-        
-        self.mask = mask
-        self.tensor_image = torch.nn.Parameter(tensor_image, requires_grad=True)
-        self.convert_tensor_to_pil_image = torchvision.transforms.ToPILImage()
+        # print(f"tensor_image.shape: {tensor_image.shape}")
+        # print(f"tensor_image: {tensor_image}")
+       
+        if wandb_config["opt_type"] == "full_vlm":
+            self.tensor_image = torch.nn.Parameter(tensor_image, requires_grad=True)
+            self.convert_tensor_to_pil_image = torchvision.transforms.ToPILImage()
+            self.param_to_optimize = [self.tensor_image]
+        elif wandb_config["opt_type"] == "lm_only":
+            # ensure that only one model is being attacked (we can only attack one model at a time in latent space) and it is a prismatic model
+            model_str = wandb_config["models_to_attack"].pop()
+            assert len(wandb_config["models_to_attack"]) == 0 and model_str.startswith("prism-")
+            vlm = self.vlm_ensemble.vlms_dict[model_str]
+            transform_fn = vlm.images_transform_fn
+
+           # transform the image 
+            images = tensor_image.repeat(wandb_config["data"]["batch_size"], 1, 1, 1)
+            transformed_images: Union[
+                torch.Tensor, Dict[str, torch.Tensor]
+            ] = transform_fn(images)
+
+            # encode and project
+            projected_patch_embeddings = vlm.model.encode_project_images(transformed_images, batch_size=wandb_config["data"]["batch_size"])
+            autocast_dtype = vlm.model.llm_backbone.half_precision_dtype
+            self.projected_patch_embeddings = torch.nn.Parameter(
+                projected_patch_embeddings.to(dtype=autocast_dtype), requires_grad=True
+            )
+            self.param_to_optimize = [self.projected_patch_embeddings]
+
+        else:
+            raise ValueError(f"Invalid optimization type: {wandb_config['opt_type']}")
         self.optimizer_step_counter = 0
         
         # Store image embeddings for language-only optimization
@@ -90,13 +88,13 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
         optimization_kwargs = self.wandb_config["optimization"]
         if optimization_kwargs["optimizer"] == "adadelta":
             optimizer = torch.optim.Adadelta(
-                [self.tensor_image],
+                self.param_to_optimize,
                 lr=optimization_kwargs["learning_rate"],
                 weight_decay=optimization_kwargs["weight_decay"],
             )
         elif optimization_kwargs["optimizer"] == "adam":
             optimizer = torch.optim.Adam(
-                [self.tensor_image],
+                self.param_to_optimize,
                 lr=optimization_kwargs["learning_rate"],
                 weight_decay=optimization_kwargs["weight_decay"],
                 eps=optimization_kwargs[
@@ -105,7 +103,7 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             )
         elif optimization_kwargs["optimizer"] == "adamw":
             optimizer = torch.optim.AdamW(
-                [self.tensor_image],
+                self.param_to_optimize,
                 lr=optimization_kwargs["learning_rate"],
                 weight_decay=optimization_kwargs["weight_decay"],
                 eps=optimization_kwargs[
@@ -114,7 +112,7 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             )
         elif optimization_kwargs["optimizer"] == "rmsprop":
             optimizer = torch.optim.RMSprop(
-                [self.tensor_image],
+                self.param_to_optimize,
                 lr=optimization_kwargs["learning_rate"],
                 weight_decay=optimization_kwargs["weight_decay"],
                 momentum=optimization_kwargs["momentum"],
@@ -122,7 +120,7 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             )
         elif optimization_kwargs["optimizer"] == "sgd":
             optimizer = torch.optim.SGD(
-                [self.tensor_image],
+                self.param_to_optimize,
                 lr=optimization_kwargs["learning_rate"],
                 weight_decay=optimization_kwargs["weight_decay"],
                 momentum=optimization_kwargs["momentum"],
@@ -177,39 +175,22 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
     def training_step(
         self, batch: Dict[str, Dict[str, torch.Tensor]], batch_idx: int
     ) -> torch.Tensor:
-        # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#training_step
         
-        if self.optimize_language_only:
-            # If we're optimizing language-only and don't have embeddings yet, compute them
-            if self.image_embeddings is None:
-                with torch.no_grad():
-                    # Get image embeddings from each model in the ensemble
-                    self.image_embeddings = {}
-                    for model_name, model_wrapper in self.vlm_ensemble.vlms_dict.items():
-                        # Pass image through vision encoder and projector
-                        vision_features = model_wrapper.vlm._encode_vision_x(vision_x=self.tensor_image)
-                        vision_tokens = model_wrapper.vlm.vision_tokenizer(vision_features)
-                        self.image_embeddings[model_name] = vision_tokens
-                        
-                        # Log the embeddings to wandb
-                        wandb.log({
-                            f"image_embeddings_model={model_name}_step={self.optimizer_step_counter}": wandb.Histogram(
-                                vision_tokens.detach().cpu().numpy().flatten()
-                            )
-                        })
-            
-            # Use stored embeddings for loss computation
+        if self.wandb_config["opt_type"] == "full_vlm":
+        # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#training_step
             losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
-                image_embeddings=self.image_embeddings,
+                image=self.tensor_image,
+                latent_image=None,
+                text_data_by_model=batch,
+            )
+        elif self.wandb_config["opt_type"] == "lm_only":
+            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
+                image=None,
+                latent_image=self.projected_patch_embeddings,
                 text_data_by_model=batch,
             )
         else:
-            # Original behavior - optimize through entire model
-            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
-                image=self.tensor_image,
-                text_data_by_model=batch,
-            )
-            
+            raise ValueError(f"Invalid optimization type: {self.wandb_config['opt_type']}")
         for loss_str, loss_val in losses_per_model.items():
             self.log(
                 f"loss/{loss_str}",
@@ -230,68 +211,49 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
         return losses_per_model["avg"]
 
     def optimizer_step(self, *args, **kwargs):
-        # Store pre-optimization state for logging
-        pre_opt_image = self.tensor_image.clone().detach()
-        
-        # Perform optimization step
+        if (
+            self.optimizer_step_counter
+            % self.wandb_config["lightning_kwargs"]["log_image_every_n_steps"]
+        ) == 0:
+            opt_type = self.wandb_config.get("opt_type", "")
+            log_key = f"jailbreak_step={self.optimizer_step_counter}"
+
+            if opt_type == "lm_only":
+                # 1. Convert tensor to CPU and save temporarily
+                tensor_to_save = self.projected_patch_embeddings.detach().cpu()
+                save_path = f"projected_patch_step={self.optimizer_step_counter}.pt"
+                torch.save(tensor_to_save, save_path)
+
+                print(f"projected_patch_embeddings first row: {self.projected_patch_embeddings[0][0]}")
+
+                # 2. Create an artifact and log it
+                artifact = wandb.Artifact(
+                    name=f"proj_patch_step_{self.optimizer_step_counter}",  # unique name
+                    type="tensor",
+                )
+                artifact.add_file(save_path)
+                wandb.log_artifact(artifact)
+
+                # 3. Log just the norm to wandb for live charting
+                wandb.log({
+                    f"{log_key}/embed_norm": tensor_to_save.to(torch.float32).norm().item()
+                })
+
+            else:
+                # Log adversarial image
+                wandb.log({
+                    log_key: wandb.Image(
+                        self.convert_tensor_to_pil_image(
+                            self.tensor_image[0].detach().to(torch.float32)
+                        )
+                    )
+                })
+                with torch.no_grad():
+                    self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
+
         super().optimizer_step(*args, **kwargs)
         self.optimizer_step_counter += 1
         
-        with torch.no_grad():
-            # First clamp all values
-            self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
-            
-            # Calculate changes before applying mask
-            pixel_changes = (self.tensor_image.data - pre_opt_image).abs()
-            max_change_masked = pixel_changes[self.mask].max().item()
-            max_change_unmasked = pixel_changes[~self.mask].max().item()
-            avg_change_masked = pixel_changes[self.mask].mean().item()
-            avg_change_unmasked = pixel_changes[~self.mask].mean().item()
-            
-            # Then restore original pixels where mask is True
-            self.tensor_image.data[self.mask] = self.original_image[self.mask]
-            
-            # Log statistics every N steps
-            if self.optimizer_step_counter % self.wandb_config["lightning_kwargs"]["log_image_every_n_steps"] == 0:
-                print(f"\nStep {self.optimizer_step_counter} pixel change statistics:")
-                print(f"- Max change in masked pixels (before restore): {max_change_masked:.6f}")
-                print(f"- Max change in unmasked pixels: {max_change_unmasked:.6f}")
-                print(f"- Avg change in masked pixels (before restore): {avg_change_masked:.6f}")
-                print(f"- Avg change in unmasked pixels: {avg_change_unmasked:.6f}")
-                
-                # Also log to wandb
-                wandb.log({
-                    f"jailbreak_image_step={self.optimizer_step_counter}": wandb.Image(
-                        data_or_path=self.convert_tensor_to_pil_image(
-                            self.tensor_image[0].detach().to(torch.float32)
-                        ),
-                    ),
-                    "pixel_changes/max_change_masked": max_change_masked,
-                    "pixel_changes/max_change_unmasked": max_change_unmasked,
-                    "pixel_changes/avg_change_masked": avg_change_masked,
-                    "pixel_changes/avg_change_unmasked": avg_change_unmasked,
-                    "optimizer_step": self.optimizer_step_counter,
-                })
-                
-                # If optimizing language-only, update and log embeddings
-                if self.optimize_language_only:
-                    for model_name, model_wrapper in self.vlm_ensemble.vlms_dict.items():
-                        with torch.no_grad():
-                            vision_features = model_wrapper.vlm._encode_vision_x(vision_x=self.tensor_image)
-                            vision_tokens = model_wrapper.vlm.vision_tokenizer(vision_features)
-                            self.image_embeddings[model_name] = vision_tokens
-                            
-                            wandb.log({
-                                f"image_embeddings_model={model_name}_step={self.optimizer_step_counter}": wandb.Histogram(
-                                    vision_tokens.detach().cpu().numpy().flatten()
-                                )
-                            })
-                
-                # Verify mask is still properly applied
-                diff_from_original = (self.tensor_image.data - self.original_image).abs().max().item()
-                if diff_from_original > 1e-6:
-                    print(f"Warning: Maximum difference from original in masked pixels: {diff_from_original:.6f}")
-
 
 class VLMEnsembleEvaluatingSystem(lightning.LightningModule):
     def __init__(

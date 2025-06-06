@@ -155,11 +155,19 @@ class VLMEnsemble(lightning.LightningModule):
 
     def compute_loss(
         self,
+        image: torch.Tensor,
+        latent_image: torch.Tensor,
         text_data_by_model: Dict[str, Dict[str, torch.Tensor]],
         image: Optional[torch.Tensor] = None,
         image_embeddings: Optional[Dict[str, torch.Tensor]] = None,
         non_blocking: bool = False,
     ) -> Dict[str, torch.Tensor]:
+        # Validate that either image or latent_image is set
+        if image is None and latent_image is None:
+            raise ValueError("Either image or latent_image must be provided")
+        if image is not None and latent_image is not None:
+            raise ValueError("Only one of image or latent_image should be provided")
+
         # Always calculate loss per model and use for updating the adversarial example.
         losses_per_model: Dict[str, torch.Tensor] = {}
         
@@ -168,29 +176,32 @@ class VLMEnsemble(lightning.LightningModule):
         
         # Create handles for async computation
         handles = {}
-        
-        for model_name, model_wrapper in self.vlms_dict.items():
-            # Get the text data for this model
-            model_text_data = text_data_by_model[model_name]
-            
-            # Compute loss based on whether we have image or embeddings
-            if image is not None:
-                # Original behavior - pass image directly
-                loss = model_wrapper.compute_loss(
-                    image=image,
-                    text_data=model_text_data,
-                )
-            else:
-                # New behavior - use pre-computed embeddings
-                loss = model_wrapper.compute_loss(
-                    image_embeddings=image_embeddings[model_name],
-                    text_data=model_text_data,
-                )
-            
-            # Store handle for async computation
-            handles[model_name] = torch.jit.fork(loss)
 
-        # Collect results from all models
+        # TODO: How to check whether or not this is blocking?
+        # Ran experiments to confirm.
+        for model_idx, (model_name, model_wrapper) in enumerate(self.vlms_dict.items()):
+            model_wrapper_device = model_wrapper.device
+            
+            # Implementation #3.
+            handles[model_name] = torch.jit.fork(
+                model_wrapper.compute_loss,
+                image=image.to(model_wrapper_device, non_blocking=non_blocking) if image is not None else None,
+                latent_image=latent_image.to(model_wrapper_device, non_blocking=non_blocking) if latent_image is not None else None,
+                input_ids=text_data_by_model[model_name]["input_ids"].to(
+                    model_wrapper_device,
+                    non_blocking=non_blocking,
+                ),
+                attention_mask=text_data_by_model[model_name]["attention_mask"].to(
+                    model_wrapper_device,
+                    non_blocking=non_blocking,
+                ),
+                labels=text_data_by_model[model_name]["labels"].to(
+                    model_wrapper_device,
+                    non_blocking=non_blocking,
+                ),
+            )
+
+        # # Collect results from all models
         for model_name, handle in handles.items():
             loss = torch.jit.wait(handle)
             losses_per_model[model_name] = loss.to(self.device, non_blocking=True)
