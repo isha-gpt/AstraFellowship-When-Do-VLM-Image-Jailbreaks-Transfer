@@ -207,7 +207,7 @@ def optimize_vlm_adversarial_examples():
                 if wandb_config["opt_type"] == "full_vlm":
                     model_generations = vlm_ensemble_system.vlm_ensemble.vlms_dict[
                         model_name_str
-                    ].generate(prompts=[prompt], image=vlm_ensemble_system.tensor_image)
+                    ].generate(image=vlm_ensemble_system.tensor_image, prompts=[prompt])
                 elif wandb_config["opt_type"] == "lm_only":
                     model_generations = vlm_ensemble_system.vlm_ensemble.vlms_dict[
                         model_name_str

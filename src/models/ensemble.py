@@ -194,7 +194,7 @@ class VLMEnsemble(lightning.LightningModule):
                 ),
             )
 
-        # # Collect results from all models
+        # Collect results from all models
         for model_name, handle in handles.items():
             loss = torch.jit.wait(handle)
             losses_per_model[model_name] = loss.to(self.device, non_blocking=True)

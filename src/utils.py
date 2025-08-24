@@ -106,10 +106,12 @@ def load_jailbreak_dicts_list(
 
         api = wandb.Api()
         if wandb_sweep_id is None and wandb_attack_run_id is not None:
+            print(f"Loading single run: {wandb_attack_run_id}")
             run = api.run(f"universal-vlm-jailbreak/{wandb_attack_run_id}")
             runs = [run]
         elif wandb_sweep_id is not None and wandb_attack_run_id is None:
-            sweep = api.sweep(f"universal-vlm-jailbreak/{wandb_attack_run_id}")
+            print(f"Loading sweep: {wandb_sweep_id}")
+            sweep = api.sweep(f"universal-vlm-jailbreak/{wandb_sweep_id}")
             runs = list(sweep.runs)
         else:
             raise ValueError(
@@ -118,34 +120,124 @@ def load_jailbreak_dicts_list(
             )
         runs_jailbreak_dict_list = []
         for run in runs:
-            for file in run.files():
-                file_name = str(file.name)
-                if not file_name.endswith(".png"):
-                    continue
-                file_dir_path = os.path.join(data_dir_path, run.id)
-                os.makedirs(file_dir_path, exist_ok=True)
-                file.download(root=file_dir_path, replace=True)
-                # Example:
-                #   'eval_data/sweep=7v3u4uq5/dz2maypg/media/images/jailbreak_image_step=500_0_6bff027c89aa794cfb3b.png'
-                # becomes
-                #   500
-                optimizer_step_counter = int(file_name.split("_")[2][5:])
-                file_path = os.path.join(file_dir_path, file_name)
-                runs_jailbreak_dict_list.append(
-                    {
-                        "file_path": file_path,
-                        "wandb_attack_run_id": run.id,
-                        "optimizer_step_counter": optimizer_step_counter,
-                        "models_to_attack": run.config["models_to_attack"],
-                    }
-                )
+            print(f"Processing run: {run.id}")
+            # Check if this is a latent attack
+            opt_type = run.config.get("opt_type", "full_vlm")
+            print(f"Optimization type: {opt_type}")
+            
+            if opt_type == "lm_only":
+                # For latent attacks, look for tensor artifacts
+                found_tensors = False
+                # Track the initial (step 0) and latest step artifacts
+                initial_artifact = None
+                latest_step = -1
+                latest_artifact = None
+                
+                for artifact in run.logged_artifacts():
+                    artifact_name = str(artifact.name)
+                    if not artifact_name.startswith("proj_patch_step_"):
+                        continue
+                    found_tensors = True
+                    
+                    # Extract step number, handling version suffix (e.g., :v10)
+                    step_str = artifact_name.split("_")[-1].split(":")[0]
+                    step = int(step_str)
+                    
+                    # Keep track of the initial step (0)
+                    if step == 0:
+                        initial_artifact = artifact
+                        print(f"Found initial tensor artifact at step 0")
+                    
+                    # Keep track of the latest step
+                    if step > latest_step:
+                        latest_step = step
+                        latest_artifact = artifact
+                
+                # Download and add initial tensor if found
+                if initial_artifact is not None:
+                    print(f"Downloading initial tensor from step 0")
+                    file_dir_path = os.path.join(data_dir_path, run.id)
+                    os.makedirs(file_dir_path, exist_ok=True)
+                    artifact_dir = initial_artifact.download(root=file_dir_path)
+                    # Move the tensor file to our target directory with the new name
+                    src_file = os.path.join(artifact_dir, "projected_patch.pt")
+                    dst_file = os.path.join(file_dir_path, "projected_patch_step_0.pt")
+                    if os.path.exists(src_file):
+                        import shutil
+                        shutil.copy2(src_file, dst_file)
+                        print(f"Copied tensor from {src_file} to {dst_file}")
+                    runs_jailbreak_dict_list.append(
+                        {
+                            "file_path": dst_file,
+                            "wandb_attack_run_id": run.id,
+                            "optimizer_step_counter": 0,
+                            "models_to_attack": run.config["models_to_attack"],
+                        }
+                    )
+                    print(f"Downloaded initial tensor for run {run.id} at step 0")
+                
+                # Download and add latest tensor if found
+                if latest_artifact is not None:
+                    print(f"Downloading latest tensor from step {latest_step}")
+                    file_dir_path = os.path.join(data_dir_path, run.id)
+                    os.makedirs(file_dir_path, exist_ok=True)
+                    artifact_dir = latest_artifact.download(root=file_dir_path)
+                    # Move the tensor file to our target directory with the new name
+                    src_file = os.path.join(artifact_dir, "projected_patch.pt")
+                    dst_file = os.path.join(file_dir_path, f"projected_patch_step_{latest_step}.pt")
+                    if os.path.exists(src_file):
+                        import shutil
+                        shutil.copy2(src_file, dst_file)
+                        print(f"Copied tensor from {src_file} to {dst_file}")
+                    runs_jailbreak_dict_list.append(
+                        {
+                            "file_path": dst_file,
+                            "wandb_attack_run_id": run.id,
+                            "optimizer_step_counter": latest_step,
+                            "models_to_attack": run.config["models_to_attack"],
+                        }
+                    )
+                    print(f"Downloaded latest tensor for run {run.id} at step {latest_step}")
+                else:
+                    print(f"No tensor artifacts found for run {run.id}")
+            else:
+                # For regular attacks, look for PNG files
+                found_images = False
+                for file in run.files():
+                    file_name = str(file.name)
+                    if not file_name.endswith(".png"):
+                        continue
+                    found_images = True
+                    print(f"Found image file: {file_name}")
+                    file_dir_path = os.path.join(data_dir_path, run.id)
+                    os.makedirs(file_dir_path, exist_ok=True)
+                    file.download(root=file_dir_path, replace=True)
+                    # Example:
+                    #   'eval_data/sweep=7v3u4uq5/dz2maypg/media/images/jailbreak_image_step=500_0_6bff027c89aa794cfb3b.png'
+                    # becomes
+                    #   500
+                    optimizer_step_counter = int(file_name.split("_")[2][5:])
+                    file_path = os.path.join(file_dir_path, file_name)
+                    runs_jailbreak_dict_list.append(
+                        {
+                            "file_path": file_path,
+                            "wandb_attack_run_id": run.id,
+                            "optimizer_step_counter": optimizer_step_counter,
+                            "models_to_attack": run.config["models_to_attack"],
+                        }
+                    )
+                    print(
+                        "Downloaded jailbreak image for run: ",
+                        run.id,
+                        " at optimizer step: ",
+                        optimizer_step_counter,
+                    )
+                if not found_images:
+                    print(f"No image files found for run {run.id}")
 
-                print(
-                    "Downloaded jailbreak image for run: ",
-                    run.id,
-                    " at optimizer step: ",
-                    optimizer_step_counter,
-                )
+        print(f"Total files found: {len(runs_jailbreak_dict_list)}")
+        if len(runs_jailbreak_dict_list) == 0:
+            print("WARNING: No files found for any runs!")
 
         # Sort runs_jailbreak_dict_list based on wandb_attack_run_id and then n_gradient_steps.
         runs_jailbreak_dict_list = sorted(

@@ -102,26 +102,60 @@ def evaluate_vlm_adversarial_examples():
     runs_jailbreak_dict_list = src.utils.load_jailbreak_dicts_list(
         wandb_attack_run_id=wandb_config["wandb_attack_run_id"],
         wandb_sweep_id=None,
-        # refresh=True,
-        refresh=False,
+        refresh=True,
     )
+    if not runs_jailbreak_dict_list:
+        raise ValueError("No jailbreak dicts found. Check if the run ID is correct and that artifacts are available.")
+
     wandb.config.update(
         {
             "models_to_attack": runs_jailbreak_dict_list[0]["models_to_attack"],
         }
     )
 
-    # Rylan uses this for debugging.
-    # runs_jailbreak_dict_list = runs_jailbreak_dict_list[-2:]
+    # Check if this is a latent attack
+    api = wandb.Api()
+    attack_run = api.run(f"universal-vlm-jailbreak/{runs_jailbreak_dict_list[0]['wandb_attack_run_id']}")
+    opt_type = attack_run.config.get("opt_type", "full_vlm")
+    
+    # Update the current eval run's config with the opt_type
+    wandb.config.update({"opt_type": opt_type})
+    wandb_config["opt_type"] = opt_type
+
+    # For lm_only runs, we want to ensure we evaluate both the initial and final tensors
+    if opt_type == "lm_only":
+        # Find the initial (step 0) and final tensors
+        initial_tensor = None
+        final_tensor = None
+        for run_jailbreak_dict in runs_jailbreak_dict_list:
+            if run_jailbreak_dict["optimizer_step_counter"] == 0:
+                initial_tensor = run_jailbreak_dict
+            if run_jailbreak_dict["optimizer_step_counter"] == max(d["optimizer_step_counter"] for d in runs_jailbreak_dict_list):
+                final_tensor = run_jailbreak_dict
+        
+        # Add initial tensor to the list if it exists and isn't already included
+        if initial_tensor:
+            if initial_tensor not in runs_jailbreak_dict_list:
+                runs_jailbreak_dict_list.insert(0, initial_tensor)
+        
+        # Add final tensor to the list if it exists and isn't already included
+        if final_tensor:
+            if final_tensor not in runs_jailbreak_dict_list:
+                runs_jailbreak_dict_list.append(final_tensor)
 
     # We need to create a placeholder image to initialize the VLMEnsembleEvaluatingSystem.
     # This ensures that Lightning can recognize the parameter and place it on the appropriate device(s).
-    placeholder_adv_image = (
-        torchvision.transforms.v2.functional.pil_to_tensor(
-            Image.open(runs_jailbreak_dict_list[0]["file_path"], mode="r")
-        ).unsqueeze(0)
-        / 255.0
-    )
+    if opt_type == "lm_only":
+        # For latent attacks, load the tensor file
+        placeholder_adv_image = torch.load(runs_jailbreak_dict_list[0]["file_path"])
+    else:
+        # For regular attacks, load the image file
+        placeholder_adv_image = (
+            torchvision.transforms.v2.functional.pil_to_tensor(
+                Image.open(runs_jailbreak_dict_list[0]["file_path"], mode="r")
+            ).unsqueeze(0)
+            / 255.0
+        )
 
     # https://lightning.ai/docs/pytorch/stable/common/precision_intermediate.html
     # "Tip: For faster initialization, you can create model parameters with the desired dtype directly on the device:"
@@ -156,15 +190,23 @@ def evaluate_vlm_adversarial_examples():
 
     # There should only be one.
     model_name_str = list(wandb_config["model_to_eval"])[0]
+    
     for jailbreak_idx, run_jailbreak_dict in enumerate(runs_jailbreak_dict_list):
+        if run_jailbreak_dict is None:
+            raise ValueError(f"run_jailbreak_dict at index {jailbreak_idx} is None. Check artifact loading.")
         # Read image from disk. This image data should match the uint8 images.
         # Shape: Batch-Channel-Height-Width
-        adv_image = (
-            torchvision.transforms.v2.functional.pil_to_tensor(
-                Image.open(run_jailbreak_dict["file_path"], mode="r")
-            ).unsqueeze(0)
-            / 255.0
-        )
+        if opt_type == "lm_only":
+            # For latent attacks, load the tensor file
+            adv_image = torch.load(run_jailbreak_dict["file_path"])
+        else:
+            # For regular attacks, load the image file
+            adv_image = (
+                torchvision.transforms.v2.functional.pil_to_tensor(
+                    Image.open(run_jailbreak_dict["file_path"], mode="r")
+                ).unsqueeze(0)
+                / 255.0
+            )
 
         wandb_additional_data = {
             "eval_model_str": model_name_str,
@@ -183,8 +225,15 @@ def evaluate_vlm_adversarial_examples():
             datamodule=text_datamodule,
         )
 
-        # Only generate every 1000 optimizer steps.
-        if (run_jailbreak_dict["optimizer_step_counter"] % 1000) != 0:
+        # Only generate every 1000 optimizer steps, or if it's the initial/final tensor for lm_only
+        if opt_type == "lm_only":
+            should_generate = (run_jailbreak_dict["optimizer_step_counter"] % 1000 == 0) or \
+                            (run_jailbreak_dict["optimizer_step_counter"] == 0) or \
+                            (run_jailbreak_dict["optimizer_step_counter"] == max(d["optimizer_step_counter"] for d in runs_jailbreak_dict_list))
+        else:
+            should_generate = (run_jailbreak_dict["optimizer_step_counter"] % 1000 == 0)
+            
+        if not should_generate:
             continue
 
         generations_prompts_targets_evals_dict = {
@@ -199,10 +248,18 @@ def evaluate_vlm_adversarial_examples():
             )
         ):
             start_time = time.time()
+            adv_image = adv_image.to(dtype=torch.bfloat16) # TODO: Remove this
             # TODO: Add a batch dimension.
-            generation = vlm_ensemble_system.vlm_ensemble.vlms_dict[
-                model_name_str
-            ].generate(image=adv_image, prompts=[prompt])[0]
+            if opt_type == "full_vlm":
+                generation = vlm_ensemble_system.vlm_ensemble.vlms_dict[
+                    model_name_str
+                ].generate(image=adv_image, prompts=[prompt])[0]
+            elif opt_type == "lm_only":
+                generation = vlm_ensemble_system.vlm_ensemble.vlms_dict[
+                    model_name_str
+                ].generate(prompts=[prompt], latent_image=adv_image)[0]
+            else:
+                raise ValueError(f"Invalid opt_type: {opt_type}")
             generations_prompts_targets_evals_dict["generations"].extend([generation])
             generations_prompts_targets_evals_dict["prompts"].extend([prompt])
             generations_prompts_targets_evals_dict["targets"].extend([target])

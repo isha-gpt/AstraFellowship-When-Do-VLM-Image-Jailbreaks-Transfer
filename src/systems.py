@@ -11,6 +11,7 @@ from src.models.ensemble import VLMEnsemble
 from src.models.evaluators import HarmBenchEvaluator, LlamaGuard2Evaluator
 from src.utils import create_initial_image
 
+torch.set_printoptions(precision=8, sci_mode=False)
 
 class AttackType(Enum):
     UNCONSTRAINED = "unconstrained"
@@ -48,19 +49,24 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             model_str = wandb_config["models_to_attack"].pop()
             assert len(wandb_config["models_to_attack"]) == 0 and model_str.startswith("prism-")
             vlm = self.vlm_ensemble.vlms_dict[model_str]
-            transform_fn = vlm.images_transform_fn
 
-           # transform the image 
-            images = tensor_image.repeat(wandb_config["data"]["batch_size"], 1, 1, 1)
-            transformed_images: Union[
-                torch.Tensor, Dict[str, torch.Tensor]
-            ] = transform_fn(images)
+            # ------------------------------------------------------------------
+            # 2. run the same image-normalisation pipeline the model expects
+            # ------------------------------------------------------------------
+            images_1 = tensor_image if tensor_image.ndim == 4 else tensor_image.unsqueeze(0)  # ensure (1,C,H,W)
+            transformed = vlm.images_transform_fn(images_1)                                   # dict or tensor
 
-            # encode and project
-            projected_patch_embeddings = vlm.model.encode_project_images(transformed_images, batch_size=wandb_config["data"]["batch_size"])
-            autocast_dtype = vlm.model.llm_backbone.half_precision_dtype
+            # ------------------------------------------------------------------
+            # 3. encode & project a SINGLE image → (1, P, d)
+            # ------------------------------------------------------------------
+            projected = vlm.model.encode_project_images(transformed, batch_size=1)
+
+            # ------------------------------------------------------------------
+            # 4. keep FP32 so tiny updates are not lost
+            # ------------------------------------------------------------------
             self.projected_patch_embeddings = torch.nn.Parameter(
-                projected_patch_embeddings.to(dtype=autocast_dtype), requires_grad=True
+                projected.to(torch.float32),      # (1, P, d)
+                requires_grad=True,
             )
             self.param_to_optimize = [self.projected_patch_embeddings]
 
@@ -165,18 +171,22 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
     ) -> torch.Tensor:
         
         if self.wandb_config["opt_type"] == "full_vlm":
-        # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#training_step
+            # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#training_step
             losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
                 image=self.tensor_image,
                 latent_image=None,
                 text_data_by_model=batch,
             )
         elif self.wandb_config["opt_type"] == "lm_only":
-            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
+            
+            autocast_dtype = torch.bfloat16
+            latent_fp16 = self.projected_patch_embeddings.to(dtype=autocast_dtype)  # keeps grad
+            losses_per_model = self.vlm_ensemble.compute_loss(
                 image=None,
-                latent_image=self.projected_patch_embeddings,
+                latent_image=latent_fp16,
                 text_data_by_model=batch,
             )
+            
         else:
             raise ValueError(f"Invalid optimization type: {self.wandb_config['opt_type']}")
         for loss_str, loss_val in losses_per_model.items():
@@ -196,15 +206,6 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             sync_dist=True,
         )
 
-        # if batch_idx == 0:
-        #     print(torch.cuda.memory_summary())
-        # for obj in gc.get_objects():
-        #     try:
-        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-        #             print(type(obj), obj.size())
-        #     except:
-        #         pass
-
         return losses_per_model["avg"]
 
     def optimizer_step(self, *args, **kwargs):
@@ -218,22 +219,29 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
             if opt_type == "lm_only":
                 # 1. Convert tensor to CPU and save temporarily
                 tensor_to_save = self.projected_patch_embeddings.detach().cpu()
-                save_path = f"projected_patch_step={self.optimizer_step_counter}.pt"
-                torch.save(tensor_to_save, save_path)
-
-                print(f"projected_patch_embeddings first row: {self.projected_patch_embeddings[0][0]}")
-
-                # 2. Create an artifact and log it
                 artifact = wandb.Artifact(
-                    name=f"proj_patch_step_{self.optimizer_step_counter}",  # unique name
+                    name=f"proj_patch_step_{self.optimizer_step_counter}",
                     type="tensor",
                 )
-                artifact.add_file(save_path)
+
+                # Option 1 ─ write directly with new_file
+                with artifact.new_file("projected_patch.pt", mode="wb") as f:
+                    torch.save(tensor_to_save, f)
+
+                # (Alternative) Option 2 ─ use an in-memory buffer
+                # buf = io.BytesIO()
+                # torch.save(tensor_to_save, buf)
+                # buf.seek(0)
+                # artifact.add_file(buf, name="projected_patch.pt")   # SDK ≥0.17
+
                 wandb.log_artifact(artifact)
 
                 # 3. Log just the norm to wandb for live charting
                 wandb.log({
-                    f"{log_key}/embed_norm": tensor_to_save.to(torch.float32).norm().item()
+                    "embed_norm": {
+                        "value": tensor_to_save.to(torch.float32).norm().item(),
+                        "step": self.optimizer_step_counter
+                    }
                 })
 
             else:
@@ -245,6 +253,9 @@ class VLMEnsembleAttackingSystem(lightning.LightningModule):
                         )
                     )
                 })
+
+                print(f"tensor_image first row: {self.tensor_image[0][0]}")
+
                 with torch.no_grad():
                     self.tensor_image.data = self.tensor_image.data.clamp(min=0.0, max=1.0)
 
@@ -272,10 +283,18 @@ class VLMEnsembleEvaluatingSystem(lightning.LightningModule):
             raise ValueError("Image must be provided!")
 
         # https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#training_step
-        losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
-            image=self.tensor_image,
-            text_data_by_model=batch,
-        )
+        if self.wandb_config["opt_type"] == "full_vlm":
+            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
+                image=self.tensor_image,
+                latent_image=None,
+                text_data_by_model=batch,
+            )
+        else:
+            losses_per_model: Dict[str, torch.Tensor] = self.vlm_ensemble.compute_loss(
+                image=None,
+                latent_image=self.tensor_image, # this is the latent image in this case
+                text_data_by_model=batch,
+            )
 
         for loss_str, loss_val in losses_per_model.items():
             self.log(

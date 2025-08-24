@@ -8,4 +8,4 @@ wandb/
 eval_data
 runs
 **/data/
-prompts_and_targets/advbench/tokenized
+prompts_and_targets/
