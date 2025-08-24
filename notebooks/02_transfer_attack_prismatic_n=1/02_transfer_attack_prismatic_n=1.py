@@ -20,18 +20,26 @@ data_dir, results_dir = src.analyze.setup_notebook_dir(
     refresh=False,
 )
 
-
 sweep_ids = [
-    "zyf0lb9y",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 1)
-    "s754hflc",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 2)
-    "jl9as45o",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 3)
-    "1yoxmmrk",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 4)
-    "bjg1o5ko",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 5)
-    "8nrhoa2q",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 6)
+    "l4z6vrlq",
+    "4cdnwkvi",
+    "i3ng4vgj",
+    "3b1iqp37",
+    "b6fpqcyn",
+    "y91siow6"
 ]
 
+# sweep_ids = [
+#     "zyf0lb9y",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 1)
+#     "s754hflc",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 2)
+#     "jl9as45o",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 3)
+#     "1yoxmmrk",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 4)
+#     "bjg1o5ko",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 5)
+#     "8nrhoa2q",  # Prismatic with N-Choose-1 Jailbreaks, AdvBench & Rylan Anthropic HHH (Part 6)
+# ]
 
-wandb_username = "rylan"
+
+wandb_username = "ishagupta2000"
 eval_runs_configs_df = src.analyze.download_wandb_project_runs_configs(
     wandb_project_path="universal-vlm-jailbreak-eval",
     data_dir=data_dir,
