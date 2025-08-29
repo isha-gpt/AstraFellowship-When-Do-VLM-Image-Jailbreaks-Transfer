@@ -10,6 +10,7 @@ import pickle
 import argparse
 from pathlib import Path
 import wandb
+import json
 
 # Add project root to Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -20,9 +21,9 @@ import src.analyze
 import src.globals
 import src.plot
 
-def load_similarity_data(metric, layer, num_images=50):
+def load_similarity_data(metric, layer, num_images=50, similarity_json_path: str = None):
     """
-    Load the similarity matrix from cached representations.
+    Load the similarity matrix from cached representations or a provided JSON file.
     Returns a dictionary with similarity scores between all model pairs.
     """
     # Define model combinations like in compare-vlv-representations.py
@@ -53,6 +54,14 @@ def load_similarity_data(metric, layer, num_images=50):
                 return pickle.load(f)
         return None
     
+    # If a JSON path is provided, load similarity directly and return
+    if similarity_json_path is not None and Path(similarity_json_path).exists():
+        with open(similarity_json_path, "r") as f:
+            data = json.load(f)
+        model_keys = data.get("model_keys")
+        matrix = np.array(data.get("similarity_matrix"))
+        return {"similarity_matrix": matrix, "model_keys": model_keys}, model_keys
+
     # Load all cached representations
     all_representations = {}
     for simple_key, prism_key in PRISM_MODEL_MAPPING.items():
@@ -387,8 +396,10 @@ def create_scatter_plot(attacked_model, similarity_data, transfer_data, metric, 
 
 def main():
     parser = argparse.ArgumentParser(description='Combine similarity metrics with attack transfer results.')
-    parser.add_argument('--attacked_model', type=str, required=True,
+    parser.add_argument('--attacked_model', type=str, required=False,
                         help='Name of the attacked model (as it appears in transfer data)')
+    parser.add_argument('--all_attacked_models', action='store_true',
+                        help='Generate plots for all attacked models')
     parser.add_argument('--metric', type=str, choices=['cosine', 'cka'], default='cosine',
                         help='Similarity metric to use')
     parser.add_argument('--layer', type=str, 
@@ -397,12 +408,16 @@ def main():
                         help='Layer to extract representations from')
     parser.add_argument('--num_images', type=int, default=50,
                         help='Number of images used for similarity computation')
+    parser.add_argument('--similarity_json', type=str, default=None,
+                        help='Path to JSON file containing similarity_matrix and model_keys')
     
     args = parser.parse_args()
     
     print(f"Loading similarity data for metric={args.metric}, layer={args.layer}...")
     try:
-        similarity_data, model_keys = load_similarity_data(args.metric, args.layer, args.num_images)
+        similarity_data, model_keys = load_similarity_data(
+            args.metric, args.layer, args.num_images, args.similarity_json
+        )
         print(f"Loaded similarity data for {len(model_keys)} models")
     except Exception as e:
         print(f"Error loading similarity data: {e}")
@@ -418,8 +433,17 @@ def main():
         print(f"Error loading transfer data: {e}")
         return
     
-    print(f"Creating scatter plot for attacked model: {args.attacked_model}")
-    create_scatter_plot(args.attacked_model, similarity_data, transfer_data, args.metric, args.layer)
+    if args.all_attacked_models:
+        attacked_models = sorted(transfer_data['models_to_attack'].unique())
+        print(f"Creating scatter plots for all attacked models: {attacked_models}")
+        for attacked_model in attacked_models:
+            create_scatter_plot(attacked_model, similarity_data, transfer_data, args.metric, args.layer)
+    else:
+        if not args.attacked_model:
+            print("Error: --attacked_model is required unless --all_attacked_models is set")
+            return
+        print(f"Creating scatter plot for attacked model: {args.attacked_model}")
+        create_scatter_plot(args.attacked_model, similarity_data, transfer_data, args.metric, args.layer)
 
 if __name__ == "__main__":
     main() 
